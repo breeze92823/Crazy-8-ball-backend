@@ -1,5 +1,7 @@
 import { MongoClient, type Collection } from "mongodb";
 
+import type { AbilityState } from "./abilities.js";
+
 import { LEADERBOARD_STATS } from "./constants.js";
 
 // Bloxity Legion hosting injects MONGODB_URI per game+channel -- an isolated database with
@@ -11,48 +13,46 @@ import { LEADERBOARD_STATS } from "./constants.js";
 export interface PlayerDoc {
   _id: string; // Bloxity user id -- see WorldRoom.ts (guests are never saved)
   username?: string; // display name as of the last save
-  trophies?: number; // Wins (the HUD's trophy counter, the shop currency)
-  gems?: number;
-  energy?: number; // lightning (rebirth.js), the race speed
-  rebirths?: number;
-  autoRebirth?: boolean;
-  bestDistance?: number; // personal best race, studs (only ever goes up)
+  cash?: number; // in-game money
+  wins?: number;
+  streak?: number; // current win streak
+  xp?: number; // ranked XP total
+  rankClaimed?: number; // rank-division rewards granted so far
+  tag?: string; // chat tag (TAG_PATTERN), "" = none
+  tutorialDone?: boolean;
+  abilityHintDone?: boolean;
+  ability?: number; // ability meter, 0..ABILITY_MAX
+  cues?: Record<string, number>; // owned cue id -> count
+  cue?: string; // the equipped cue (an owned one), "" = none
+  bag?: BagItem[]; // lucky blocks held
+  hotbar?: string[]; // bag uids on the hotbar
+  perks?: string[]; // one-off claims the client made (e.g. the starter cue)
   playtime?: number; // s with the game visible
-  boats?: string[]; // owned boat ids (client BOATS.list)
-  boat?: string; // the equipped boat (an owned one)
-  engines?: string[]; // owned engine ids (client engine.js ENGINES)
-  engine?: string; // the equipped engine, "" = none
-  partners?: string[]; // owned partner ids (client PARTNER.partners)
-  partner?: string; // the equipped partner, "" = none
-  trails?: string[]; // owned trail ids (client TRAILS.list)
-  trail?: string; // the equipped trail, "" = none
-  pets?: SavedPet[]; // owned pets (client pets.js), at most PETS_MAX
-  petSlots?: number; // pets equipped at once
-  petStorage?: number; // pets owned at most
-  eggsSeen?: string[]; // pet kinds ever hatched (client eggs.js: the NEW! tag)
-  world?: string; // the world the player was in (client worlds.js WORLDS), "" = the start world
-  worldsUnlocked?: string[]; // worlds whose portal requirement was met once (they stay open)
-  giftTime?: number; // Online Gifts clock, s online this round
-  giftsClaimed?: number[]; // GIFTS.list indexes claimed this round
-  potions?: Record<string, number>; // potion id -> count (gifts.js)
   lastSeen?: number; // epoch ms of the last activity
   // Spin wheel (spin.ts): written only by the server's `spin` handler, never by saveProgress.
   spins?: number; // spins ready to use
   spinAt?: number; // epoch ms the next free spin arrives
-  // Daily Reward (daily.ts): written by the server only, never by saveProgress.
+  // Daily Reward + streak track (daily.ts): written by the server only, never by saveProgress.
   dailyDay?: number; // days unlocked this cycle
   dailyLast?: number; // UTC day index of the last unlock
   dailyClaimed?: number[]; // claimed day indexes this cycle
+  trackDays?: number; // streak track steps (0..TRACK_DAYS)
+  trackClaimed?: number[]; // claimed TRACK_MILESTONES indexes
+  // Playtime gifts (gifts.ts): written by the server only, never by saveProgress.
+  giftDay?: number; // UTC day index the counters belong to
+  giftSecs?: number; // s played that day
+  giftsClaimed?: number[]; // GIFT_MINUTES indexes claimed that day
+  // Ability Spin (abilities.ts): slots, spins, pity, codes. Written by the server only, never by saveProgress.
+  abilities?: AbilityState;
   version: number;
   updatedAt: Date;
 }
 
-// One owned pet: its kind (client PETS.kinds key) and craft tier (index into PETS.tiers).
-export interface SavedPet {
+// One lucky block held: a unique uid, its kind (client catalog id) and when it may be opened.
+export interface BagItem {
+  uid: string;
   kind: string;
-  tier: number;
-  equipped: boolean;
-  locked: boolean;
+  readyAt: number; // epoch ms
 }
 
 let client: MongoClient | null = null;

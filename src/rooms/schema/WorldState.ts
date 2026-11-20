@@ -6,22 +6,27 @@ export const PlayerState = schema(
   {
     username: t.string().default(""), // client-reported Bloxity displayName/username, not validated
     signedIn: t.boolean().default(false), // has a Bloxity id: only signed-in players are saved
-    pfp: t.string().default(""), // Bloxity profile picture URL ("" = none), for the others' racer heads
+    pfp: t.string().default(""), // Bloxity profile picture URL ("" = none), for the others to draw
     racing: t.boolean().default(false), // in a race right now (`race` message)
     distance: t.float64().default(0), // this race's distance so far, studs
     // Presence (presence.ts, `pose` / `loadout` / `setAvatar`): what the others draw in the world.
-    x: t.float64().default(0), // feet position in track coordinates (z minus the race scroll)
+    x: t.float64().default(0), // feet position
     y: t.float64().default(0),
     z: t.float64().default(0),
-    yaw: t.float32().default(0), // heading, rad (PI = facing the gate)
-    speed: t.float32().default(0), // m/s, for flames and dead reckoning
-    boat: t.string().default(""), // equipped catalog ids (client config.js), "" = none / default
-    engine: t.string().default(""),
-    trail: t.string().default(""),
-    partner: t.string().default(""),
-    pets: t.string().default(""), // equipped pets "kind:tier,kind:tier"
-    world: t.string().default(""), // the world the player is in (client WORLDS id), "" = the start world
+    yaw: t.float32().default(0), // heading, rad
+    speed: t.float32().default(0), // m/s, for dead reckoning
+    cue: t.string().default(""), // equipped cue id (client catalog), "" = none
+    tag: t.string().default(""), // chat tag (capitals/spaces), "" = none
     avatar: t.string().default(""), // Bloxity look JSON { equipped, proportions, skin }, "" = default
+    // Players list (presence.ts `stats`): what the others show in the hub's Players panel.
+    wins: t.uint32().default(0),
+    cash: t.float64().default(0), // money ($)
+    rank: t.uint8().default(0), // rank badge tier, 0..RANK_BADGE_MAX
+    flag: t.string().default(""), // ISO country code ("" = unknown)
+    // Emotes (presence.ts `emote`): the emote playing ("" = none); emoteSeq bumps on every
+    // `emote` so the same emote played twice still restarts on the other clients.
+    emote: t.string().default(""),
+    emoteSeq: t.uint16().default(0),
   },
   "PlayerState",
 );
