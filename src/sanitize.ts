@@ -1,8 +1,8 @@
 import {
-  CURRENCY_MAX, REBIRTHS_MAX, DISTANCE_MAX, PLAY_SECONDS_MAX, OWNED_MAX, PETS_MAX, PET_TIERS_MAX,
-  PET_SLOTS_MAX, GIFTS_MAX, POTION_KINDS_MAX, POTION_COUNT_MAX, ID_PATTERN,
+  ABILITY_MAX, BAG_MAX, BAG_READY_MAX_MS, CUE_COUNT_MAX, CUES_MAX, CURRENCY_MAX, HOTBAR_MAX, ID_PATTERN, IDS_MAX,
+  PLAY_SECONDS_MAX, RANK_LEVELS_MAX, STREAK_MAX, TAG_PATTERN, UID_PATTERN, WINS_MAX, XP_MAX,
 } from "./constants.js";
-import type { PlayerDoc, SavedPet } from "./db.js";
+import type { BagItem, PlayerDoc } from "./db.js";
 
 export function finite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -16,84 +16,82 @@ export function clampInt(v: number, max: number, min = 0): number {
 function isObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }
-const isId = (v: unknown): v is string => typeof v === "string" && ID_PATTERN.test(v);
+export const isId = (v: unknown): v is string => typeof v === "string" && ID_PATTERN.test(v);
+export const isTag = (v: unknown): v is string => typeof v === "string" && TAG_PATTERN.test(v);
+const isUid = (v: unknown): v is string => typeof v === "string" && UID_PATTERN.test(v);
 
-// Catalog ids (boats, engines, partners, trails): slug strings, no duplicates, bounded count.
-export function sanitizeIds(raw: unknown, max = OWNED_MAX): string[] {
+// Catalog ids (perks): slug strings, no duplicates, bounded count.
+export function sanitizeIds(raw: unknown, max = IDS_MAX): string[] {
   if (!Array.isArray(raw)) return [];
   return [...new Set(raw.filter(isId))].slice(0, max);
 }
 
-// Owned pets { kind, tier, equipped, locked }: slug kinds, integer tiers, at most PETS_MAX, and no
-// more than `slots` of them equipped (the extra ones are unequipped, never dropped).
-export function sanitizePets(raw: unknown, slots = PET_SLOTS_MAX): SavedPet[] {
-  if (!Array.isArray(raw)) return [];
-  const out: SavedPet[] = [];
-  let equipped = 0;
-  for (const p of raw) {
-    if (out.length >= PETS_MAX) break;
-    if (!isObject(p) || !isId(p.kind) || !Number.isInteger(p.tier) || (p.tier as number) < 0 || (p.tier as number) >= PET_TIERS_MAX) continue;
-    const on = p.equipped === true && equipped < slots;
-    if (on) equipped++;
-    out.push({ kind: p.kind, tier: p.tier as number, equipped: on, locked: p.locked === true });
-  }
-  return out;
-}
-
-// Potion counts { id: n }: slug ids, whole non-negative counts, bounded kinds.
-function sanitizePotions(raw: unknown): Record<string, number> {
+// Owned cues { id: count }: slug ids, whole counts 1..CUE_COUNT_MAX (0 / negative / non-finite
+// entries are dropped), at most CUES_MAX kinds.
+export function sanitizeCues(raw: unknown): Record<string, number> {
   const out: Record<string, number> = {};
   if (!isObject(raw)) return out;
-  for (const [id, n] of Object.entries(raw)) {
-    if (Object.keys(out).length >= POTION_KINDS_MAX) break;
-    if (isId(id) && finite(n)) out[id] = clampInt(n, POTION_COUNT_MAX);
+  let n = 0;
+  for (const [id, count] of Object.entries(raw)) {
+    if (n >= CUES_MAX) break;
+    if (!isId(id) || !finite(count) || count < 1) continue;
+    out[id] = clampInt(count, CUE_COUNT_MAX, 1);
+    n++;
   }
   return out;
 }
 
-// One owned list + its equipped id. The equipped one must be owned ("" = none); when this save
-// doesn't carry the list, trust the id's shape only.
-function ownedPair(raw: Record<string, unknown>, out: Partial<PlayerDoc>, listKey: "boats" | "engines" | "partners" | "trails", idKey: "boat" | "engine" | "partner" | "trail") {
-  if (raw[listKey] !== undefined) out[listKey] = sanitizeIds(raw[listKey]);
-  const id = raw[idKey];
-  const owned = out[listKey];
-  if (id === "") out[idKey] = "";
-  else if (isId(id) && (!owned || owned.includes(id))) out[idKey] = id;
+// Lucky blocks held [{ uid, kind, readyAt }]: unique uids, slug kinds, readyAt clamped to at most
+// BAG_READY_MAX_MS ahead of the server clock; at most BAG_MAX.
+export function sanitizeBag(raw: unknown, now = Date.now()): BagItem[] {
+  if (!Array.isArray(raw)) return [];
+  const out: BagItem[] = [];
+  const seen = new Set<string>();
+  for (const b of raw) {
+    if (out.length >= BAG_MAX) break;
+    if (!isObject(b) || !isUid(b.uid) || seen.has(b.uid) || !isId(b.kind) || !finite(b.readyAt)) continue;
+    seen.add(b.uid);
+    out.push({ uid: b.uid, kind: b.kind, readyAt: clampNum(b.readyAt, now + BAG_READY_MAX_MS) });
+  }
+  return out;
+}
+
+// Hotbar: unique uids, at most HOTBAR_MAX; when the save carries the bag, each must be in it.
+export function sanitizeHotbar(raw: unknown, bag?: BagItem[]): string[] {
+  if (!Array.isArray(raw)) return [];
+  const inBag = bag && new Set(bag.map((b) => b.uid));
+  return [...new Set(raw.filter((u): u is string => isUid(u) && (!inBag || inBag.has(u))))].slice(0, HOTBAR_MAX);
 }
 
 // The game is client-authoritative -- no server-side gameplay validation. What IS enforced:
 // shape and bounds, so a malformed payload can never corrupt this player's own Mongo document.
-// A forged number can only ever affect the sender's own save.
+// A forged number can only ever affect the sender's own save. Server-owned fields (spins, daily,
+// track, gifts) are never read here, so saveProgress can't write them.
 export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (!isObject(raw)) return null;
   const out: Partial<PlayerDoc> = {};
 
-  if (finite(raw.trophies)) out.trophies = clampNum(raw.trophies, CURRENCY_MAX);
-  if (finite(raw.gems)) out.gems = clampNum(raw.gems, CURRENCY_MAX);
-  if (finite(raw.energy)) out.energy = clampNum(raw.energy, CURRENCY_MAX);
-  if (finite(raw.rebirths)) out.rebirths = clampInt(raw.rebirths, REBIRTHS_MAX);
-  if (typeof raw.autoRebirth === "boolean") out.autoRebirth = raw.autoRebirth;
-  if (finite(raw.bestDistance)) out.bestDistance = clampNum(raw.bestDistance, DISTANCE_MAX);
+  if (finite(raw.cash)) out.cash = clampNum(raw.cash, CURRENCY_MAX);
+  if (finite(raw.wins)) out.wins = clampInt(raw.wins, WINS_MAX);
+  if (finite(raw.streak)) out.streak = clampInt(raw.streak, STREAK_MAX);
+  if (finite(raw.xp)) out.xp = clampInt(raw.xp, XP_MAX);
+  if (finite(raw.rankClaimed)) out.rankClaimed = clampInt(raw.rankClaimed, RANK_LEVELS_MAX);
+  if (isTag(raw.tag)) out.tag = raw.tag;
+  if (typeof raw.tutorialDone === "boolean") out.tutorialDone = raw.tutorialDone;
+  if (typeof raw.abilityHintDone === "boolean") out.abilityHintDone = raw.abilityHintDone;
+  if (finite(raw.ability)) out.ability = clampNum(raw.ability, ABILITY_MAX);
+
+  // The equipped cue must be owned ("" = none); when this save doesn't carry `cues`, trust the
+  // id's shape only.
+  if (raw.cues !== undefined) out.cues = sanitizeCues(raw.cues);
+  if (raw.cue === "") out.cue = "";
+  else if (isId(raw.cue) && (!out.cues || Object.hasOwn(out.cues, raw.cue))) out.cue = raw.cue;
+
+  if (raw.bag !== undefined) out.bag = sanitizeBag(raw.bag);
+  if (raw.hotbar !== undefined) out.hotbar = sanitizeHotbar(raw.hotbar, out.bag);
+  if (raw.perks !== undefined) out.perks = sanitizeIds(raw.perks);
+
   if (finite(raw.playtime)) out.playtime = clampInt(raw.playtime, PLAY_SECONDS_MAX);
   if (finite(raw.lastSeen)) out.lastSeen = clampInt(raw.lastSeen, Date.now() + 10 * 60 * 1000);
-
-  ownedPair(raw, out, "boats", "boat");
-  ownedPair(raw, out, "engines", "engine");
-  ownedPair(raw, out, "partners", "partner");
-  ownedPair(raw, out, "trails", "trail");
-
-  if (finite(raw.petSlots)) out.petSlots = clampInt(raw.petSlots, PET_SLOTS_MAX, 1);
-  if (finite(raw.petStorage)) out.petStorage = clampInt(raw.petStorage, PETS_MAX, 1);
-  if (raw.pets !== undefined) out.pets = sanitizePets(raw.pets, out.petSlots ?? PET_SLOTS_MAX);
-  if (raw.eggsSeen !== undefined) out.eggsSeen = sanitizeIds(raw.eggsSeen);
-  if (raw.world === "" || isId(raw.world)) out.world = raw.world as string;
-  if (raw.worldsUnlocked !== undefined) out.worldsUnlocked = sanitizeIds(raw.worldsUnlocked);
-
-  if (finite(raw.giftTime)) out.giftTime = clampInt(raw.giftTime, PLAY_SECONDS_MAX);
-  if (raw.giftsClaimed !== undefined) {
-    const claimed = Array.isArray(raw.giftsClaimed) ? raw.giftsClaimed.filter((i): i is number => Number.isInteger(i) && i >= 0 && i < GIFTS_MAX) : [];
-    out.giftsClaimed = [...new Set(claimed)];
-  }
-  if (raw.potions !== undefined) out.potions = sanitizePotions(raw.potions);
   return out;
 }

@@ -1,8 +1,8 @@
 {
   "private": true,
-  "name": "bowling-roll-server",
+  "name": "crazy-8-ball-server",
   "version": "0.1.0",
-  "description": "Colyseus server for Bowling Roll: progress saving and the room roster",
+  "description": "Colyseus server for Crazy 8 Ball: progress saving, daily rewards, playtime gifts, leaderboards and the room roster",
   "type": "module",
   "main": "build/index.js",
   "engines": {
