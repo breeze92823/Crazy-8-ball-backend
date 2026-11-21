@@ -7,7 +7,7 @@ import { accrue, rollWedge, spinStateFrom, type SpinState } from "../spin.js";
 import { claimDaily, claimTrack, copyDaily, dailyFields, dailyView, readDaily, rollDaily, unlockAllDaily, type DailyState } from "../daily.js";
 import { advanceGifts, claimGift, giftFields, giftsView, readGifts, type GiftState } from "../gifts.js";
 import { applyAvatar, applyEmote, applyLoadout, applyPose, applyStats } from "../presence.js";
-import { ranksOf, topBoards } from "../leaderboard.js";
+import { countryBoard, ranksOf, topBoards } from "../leaderboard.js";
 import { abilitiesFrom, abilityActions, type AbilityResult, type AbilityState } from "../abilities.js";
 import { Tables } from "../tables.js";
 import { boxity, reportWins, verifyAdReward, verifyToken } from "../boxity.js";
@@ -216,7 +216,10 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     // Players list: the sender's wins / money / rank badge / country, for everyone's Players panel.
     stats: (client: Client, msg: unknown) => {
       const p = this.state.players.get(client.sessionId);
-      if (p) applyStats(p, msg);
+      if (!p) return;
+      const flag = p.flag;
+      applyStats(p, msg);
+      if (p.flag !== flag) void this.saveCountry(client.sessionId);
     },
     // Emotes: { id } starts one (client catalog id), { id: "" } stops it; at most one per
     // EMOTE_GAP_MS (a stop always goes through, so a player's emote never sticks).
@@ -308,12 +311,16 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   }
 
   // `leaderboard` { boards: { wins|xp: [{ name, value }] }, ranks: { stat: n | null } }.
+  // `countries` = the Top Countries board ([{ flag, value }]), `country` = this player's country's
+  // place ({ flag, rank, value } or null).
   private async sendLeaderboard(client: Client) {
     const userId = this.userIds.get(client.sessionId) ?? "";
     const [boards, ranks] = await Promise.all([topBoards(), ranksOf(userId)]);
-    if (!this.state.players.has(client.sessionId)) return;
+    const p = this.state.players.get(client.sessionId);
+    if (!p) return;
+    const { top, mine } = countryBoard(p.flag);
     try {
-      client.send("leaderboard", { boards, ranks });
+      client.send("leaderboard", { boards, ranks, countries: top, country: mine });
     } catch {
       // Gone meanwhile.
     }
@@ -476,6 +483,20 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     return { spins: s.spins, nextAt: s.nextAt, serverTime: now };
   }
 
+  // The player's country (roster `flag`, from `stats`) on their doc, for the Top Countries board.
+  // Signed-in players only, once their save was read; "" leaves the stored one.
+  private async saveCountry(sessionId: string) {
+    const userId = this.userIds.get(sessionId);
+    const flag = this.state.players.get(sessionId)?.flag;
+    const players = getPlayers();
+    if (!userId || !flag || !players || !this.loaded.has(sessionId)) return;
+    try {
+      await players.updateOne({ _id: userId }, { $set: { country: flag }, $setOnInsert: { version: 1 } }, { upsert: true });
+    } catch (err) {
+      console.warn("[WorldRoom] saveCountry failed", err);
+    }
+  }
+
   // The spin fields go straight to Mongo (saveProgress never carries them).
   private async saveSpins(sessionId: string, s: SpinState) {
     const userId = this.userIds.get(sessionId);
@@ -608,6 +629,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
 
     this.loaded.add(client.sessionId);
     if (userId) this.counts.set(client.sessionId, { wins: doc?.matchWins ?? 0, matches: doc?.matchesPlayed ?? 0 });
+    if (userId && p.flag && doc?.country !== p.flag) void this.saveCountry(client.sessionId);
     const now = Date.now();
     const spin = spinStateFrom(doc, now);
     this.spinStates.set(client.sessionId, spin);

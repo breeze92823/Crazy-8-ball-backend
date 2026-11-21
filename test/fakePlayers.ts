@@ -36,6 +36,37 @@ export function fakePlayers(seed: PlayerDoc[] = []) {
       };
       return cursor;
     },
+    // The Top Countries pipeline: $match ({ f: { $gt } } / { f: { $regex } }), $group by one field
+    // with { $sum: "$f" }, $sort ({ f: -1, _id: 1 }).
+    aggregate(pipeline: any[]) {
+      let rows: any[] = [...docs.values()];
+      for (const stage of pipeline) {
+        if (stage.$match) {
+          rows = rows.filter((d) =>
+            Object.entries(stage.$match).every(([f, cond]: [string, any]) =>
+              "$gt" in cond ? d[f] > cond.$gt : typeof d[f] === "string" && new RegExp(cond.$regex).test(d[f]),
+            ),
+          );
+        } else if (stage.$group) {
+          const { _id, ...sums } = stage.$group;
+          const groups = new Map<string, any>();
+          for (const d of rows) {
+            const key = d[String(_id).slice(1)];
+            const g = groups.get(key) ?? { _id: key };
+            for (const [out, op] of Object.entries(sums) as [string, any][]) g[out] = (g[out] ?? 0) + (d[String(op.$sum).slice(1)] ?? 0);
+            groups.set(key, g);
+          }
+          rows = [...groups.values()];
+        } else if (stage.$sort) {
+          const keys = Object.entries(stage.$sort) as [string, number][];
+          rows.sort((a, b) => {
+            for (const [f, dir] of keys) if (a[f] !== b[f]) return dir * (a[f] < b[f] ? -1 : 1);
+            return 0;
+          });
+        }
+      }
+      return { toArray: async () => rows };
+    },
     async countDocuments(filter: Record<string, { $gt: number }>) {
       const [field, { $gt }] = Object.entries(filter)[0];
       return [...docs.values()].filter((d: any) => d[field] > $gt).length;
