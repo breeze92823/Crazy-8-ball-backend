@@ -47,6 +47,8 @@ export interface PlayerDoc {
   // Server-counted matches (tables.ts results): the Wins leaderboard and profile stats. Server only.
   matchWins?: number;
   matchesPlayed?: number;
+  // ISO country code from the roster's `stats` flag (the hub's Top Countries board). Server only.
+  country?: string;
   version: number;
   updatedAt: Date;
 }

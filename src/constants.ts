@@ -87,6 +87,8 @@ export const SPIN_WEDGES = [
 export const LEADERBOARD_STATS = ["wins", "xp"] as const;
 export type LeaderboardStat = (typeof LEADERBOARD_STATS)[number];
 export const LEADERBOARD_SIZE = 10;
+// Top Countries (leaderboard.ts): rows sent per refresh (every saved country is ranked).
+export const LEADERBOARD_COUNTRIES = 10;
 export const LEADERBOARD_EVERY_MS = 60 * 1000;
 
 // Pool tables (tables.ts): players per team on each table, in the client's TABLE_GRID order (row by
