@@ -1,5 +1,11 @@
 // Keep in step with the client's src/config.js by hand.
-export const ROOM_MAX_CLIENTS = 50;
+// The game's Boxity hosting id / slug (client GAME_SLUG): token checks, ad rewards.
+export const GAME_SLUG = "crazy-8-ball";
+// Profile stats (boxity.ts reportStats): how often every signed-in player's counters go out.
+export const STATS_EVERY_MS = 60_000;
+// Rewarded ad "double match cash": how long after a match its result card may claim it.
+export const AD_REWARD_WINDOW_MS = 10 * 60_000;
+export const ROOM_MAX_CLIENTS = 24;
 
 // Longest accepted strings.
 export const NAME_MAX = 64;
@@ -82,6 +88,20 @@ export const LEADERBOARD_STATS = ["wins", "xp"] as const;
 export type LeaderboardStat = (typeof LEADERBOARD_STATS)[number];
 export const LEADERBOARD_SIZE = 10;
 export const LEADERBOARD_EVERY_MS = 60 * 1000;
+
+// Pool tables (tables.ts): players per team on each table, in the client's TABLE_GRID order (row by
+// row: 1 = 1v1, 2 = 2v2, 3 = 3v3). Matches need every seat filled by a real player.
+export const TABLE_TEAMS = [2, 2, 3, 3, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1] as const;
+export const TABLE_COUNTDOWN_MS = 3000; // a full table -> the match (client LOBBY.countdown)
+export const TABLE_COOLDOWN_MS = 4000; // a finished match -> the table opens again
+export const TABLE_TICK_MS = 250;
+// Backstops for a shooter whose client stops answering: a turn with no shot (client shot clock 30 s,
+// 40 s in the tutorial) and a shot that never settles (client safety stop 16 s) end as a foul.
+export const TURN_MS = 50_000;
+export const ROLL_MS = 25_000;
+export const BALL_COORD_MAX = 30_000; // |x|, |z| of a relayed ball, 1e-4 m
+export const BALL_EVENTS_MAX = 40; // sound/fx events in one mBalls
+export const MATCH_TEXT_MAX = 64; // foul reason / result line
 
 // Ids from the client's catalogs (cues, lucky-block kinds, perks): slugs, so nothing odd is stored.
 export const ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
