@@ -1,4 +1,4 @@
-import { AVATAR_MAX_LEN, CURRENCY_MAX, FLAG_PATTERN, ID_PATTERN, POSE_BOUNDS, RANK_BADGE_MAX, TAG_PATTERN, WINS_MAX } from "./constants.js";
+import { AVATAR_MAX_LEN, CURRENCY_MAX, FLAG_PATTERN, ID_PATTERN, POSE_BOUNDS, RANK_BADGE_MAX, STREAK_MAX, TAG_PATTERN, WINS_MAX } from "./constants.js";
 import type { PlayerState } from "./rooms/schema/WorldState.js";
 
 // Presence: what the other clients need to draw a player in the world.
@@ -36,7 +36,7 @@ export function applyAvatar(p: PlayerState, msg: unknown): void {
   if (typeof a === "string" && a.length <= AVATAR_MAX_LEN) p.avatar = a;
 }
 
-// `stats` { wins, cash, rank, flag }: what the hub's Players panel shows for this player. Like the
+// `stats` { wins, cash, rank, flag, streak }: what the hub's Players panel and name tags show for this player. Like the
 // save it is client-reported; only bounded here (whole numbers, the save ceilings, a 2-letter code).
 export function applyStats(p: PlayerState, msg: unknown): void {
   if (!msg || typeof msg !== "object") return;
@@ -44,6 +44,7 @@ export function applyStats(p: PlayerState, msg: unknown): void {
   if (finite(m.wins)) p.wins = Math.floor(clamp(m.wins, 0, WINS_MAX));
   if (finite(m.cash)) p.cash = Math.floor(clamp(m.cash, 0, CURRENCY_MAX));
   if (finite(m.rank)) p.rank = Math.floor(clamp(m.rank, 0, RANK_BADGE_MAX));
+  if (finite(m.streak)) p.streak = Math.floor(clamp(m.streak, 0, STREAK_MAX));
   if (m.flag === "" || (typeof m.flag === "string" && FLAG_PATTERN.test(m.flag))) p.flag = m.flag as string;
 }
 

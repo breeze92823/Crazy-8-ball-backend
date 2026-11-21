@@ -54,20 +54,23 @@ describe("presence", () => {
   });
   it("takes the players-list stats from the join options and bounds `stats`", async () => {
     const room = await colyseus.createRoom<WorldState>("world", {});
-    const a = await colyseus.connectTo(room, { userId: "guest-a", stats: { wins: 12, cash: 700.9, rank: 2, flag: "LK" } });
+    const a = await colyseus.connectTo(room, { userId: "guest-a", stats: { wins: 12, cash: 700.9, rank: 2, flag: "LK", streak: 4 } });
     const b = await colyseus.connectTo(room, { userId: "guest-b" });
     await sleep(50);
     const p = room.state.players.get(a.sessionId)!;
-    assert.deepStrictEqual([p.wins, p.cash, p.rank, p.flag], [12, 700, 2, "LK"]);
+    assert.deepStrictEqual([p.wins, p.cash, p.rank, p.flag, p.streak], [12, 700, 2, "LK", 4]);
 
-    a.send("stats", { wins: -5, cash: 1e20, rank: 99, flag: "lk" });
+    a.send("stats", { wins: -5, cash: 1e20, rank: 99, flag: "lk", streak: -2 });
     await sleep(150);
-    assert.deepStrictEqual([p.wins, p.cash, p.rank, p.flag], [0, 1e15, RANK_BADGE_MAX, "LK"], "clamped; a malformed flag is ignored");
+    assert.deepStrictEqual([p.wins, p.cash, p.rank, p.flag, p.streak], [0, 1e15, RANK_BADGE_MAX, "LK", 0], "clamped; a malformed flag is ignored");
     a.send("stats", { wins: 3.7, cash: "lots", flag: "" });
     await sleep(150);
     assert.deepStrictEqual([p.wins, p.cash, p.flag], [3, 1e15, ""], "whole wins; a non-number is ignored");
     const seen = (b.state as any).players.get(a.sessionId);
     assert.strictEqual(seen.wins, 3, "relayed to the others");
+    a.send("stats", { streak: 2.9 });
+    await sleep(150);
+    assert.strictEqual(seen.streak, 2, "the win streak reaches the others (their name-tag flame)");
   });
 
   it("relays emotes with a sequence number, rate-limited, and stops them", async () => {

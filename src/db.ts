@@ -44,6 +44,9 @@ export interface PlayerDoc {
   giftsClaimed?: number[]; // GIFT_MINUTES indexes claimed that day
   // Ability Spin (abilities.ts): slots, spins, pity, codes. Written by the server only, never by saveProgress.
   abilities?: AbilityState;
+  // Server-counted matches (tables.ts results): the Wins leaderboard and profile stats. Server only.
+  matchWins?: number;
+  matchesPlayed?: number;
   version: number;
   updatedAt: Date;
 }

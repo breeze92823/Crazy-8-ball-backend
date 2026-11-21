@@ -1,6 +1,6 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState } from "./schema/WorldState.js";
-import { DISTANCE_MAX, EMOTE_GAP_MS, GIFT_SAVE_MS, GIFT_TICK_MS, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
+import { AD_REWARD_WINDOW_MS, DISTANCE_MAX, EMOTE_GAP_MS, GIFT_SAVE_MS, GIFT_TICK_MS, TABLE_TICK_MS, GUEST_ID_PREFIX, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
 import { accrue, rollWedge, spinStateFrom, type SpinState } from "../spin.js";
@@ -9,6 +9,8 @@ import { advanceGifts, claimGift, giftFields, giftsView, readGifts, type GiftSta
 import { applyAvatar, applyEmote, applyLoadout, applyPose, applyStats } from "../presence.js";
 import { ranksOf, topBoards } from "../leaderboard.js";
 import { abilitiesFrom, abilityActions, type AbilityResult, type AbilityState } from "../abilities.js";
+import { Tables } from "../tables.js";
+import { boxity, reportWins, verifyAdReward, verifyToken } from "../boxity.js";
 
 function sanitizeName(raw: unknown): string {
   return typeof raw === "string" ? raw.slice(0, NAME_MAX) : "";
@@ -19,7 +21,7 @@ function sanitizePfp(raw: unknown): string {
 }
 
 /**
- * Room every client joins via `client.joinOrCreate("world", { userId, username })`. Loads and
+ * Room every client joins via `client.joinOrCreate("world", { token, userId, username })`. Loads and
  * saves each signed-in player's progress (MongoDB, see db.ts) -- the client keeps no save of its
  * own, so this is the only place progress lives. The game is client-authoritative: no gameplay
  * rules live here, saves are only bounded (sanitize.ts). Full rooms spill into a fresh one
@@ -28,6 +30,8 @@ function sanitizePfp(raw: unknown): string {
 export class WorldRoom extends Room<{ state: WorldState }> {
   state = new WorldState();
   maxClients = ROOM_MAX_CLIENTS;
+  // Every live room of this process (index.ts reports their players' profile stats).
+  static live = new Set<WorldRoom>();
 
   // sessionId -> user id (Bloxity id). Deliberately NOT part of WorldState: it only gates this
   // room's own Mongo reads/writes. Guests have no entry.
@@ -53,6 +57,23 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   private abilityBusy = new Set<string>();
   // sessionId -> when its last emote started (EMOTE_GAP_MS rate limit).
   private emoteAt = new Map<string, number>();
+  // sessionId -> server-counted matches of a signed-in player (Mongo matchWins / matchesPlayed),
+  // set once its save is read: the Wins leaderboard and profile stats (boxity.ts).
+  counts = new Map<string, { wins: number; matches: number }>();
+  // sessionId -> when its last match ended: the result card's rewarded ad may be claimed once.
+  private adWindow = new Map<string, number>();
+  // sessionId -> its identity checks in order (join, then each `identify`).
+  private idChain = new Map<string, Promise<void>>();
+  // The hub's pool tables (tables.ts): pads, countdowns and real-player matches.
+  tables = new Tables(
+    this.state.tables,
+    (type, msg, except) => {
+      const skip = except ? this.clients.find((c) => c.sessionId === except) : undefined;
+      this.broadcast(type, msg, skip ? { except: skip } : undefined);
+    },
+    (sid) => this.state.players.get(sid)?.username || "A player",
+    { start: (sids) => this.countMatch(sids, false), end: (winners, sids) => this.matchEnded(winners, sids) },
+  );
 
   messages = {
     // Debounced push of the client's whole progress. Upserts, so a first save creates the document.
@@ -207,14 +228,36 @@ export class WorldRoom extends Room<{ state: WorldState }> {
       if (!stop && now - (this.emoteAt.get(client.sessionId) ?? 0) < EMOTE_GAP_MS) return;
       if (applyEmote(p, msg) && !stop) this.emoteAt.set(client.sessionId, now);
     },
+    // Pool tables (tables.ts): join pads, then the shooter's aim / shot / rolling balls / outcome,
+    // relayed to everyone (the outcome as `mTurn`, with the next shooter picked here).
+    padJoin: (client: Client, msg: { table?: unknown; team?: unknown }) => {
+      if (this.state.players.has(client.sessionId)) this.tables.join(client.sessionId, msg?.table, msg?.team);
+    },
+    padLeave: (client: Client) => this.tables.leave(client.sessionId, "pad"),
+    mForfeit: (client: Client) => this.tables.leave(client.sessionId, "forfeit"),
+    mAim: (client: Client, msg: unknown) => this.tables.aim(client.sessionId, (msg ?? {}) as object),
+    mShot: (client: Client, msg: unknown) => this.tables.shot(client.sessionId, (msg ?? {}) as object),
+    mBalls: (client: Client, msg: unknown) => this.tables.balls(client.sessionId, (msg ?? {}) as object),
+    mEnd: (client: Client, msg: unknown) => this.tables.end(client.sessionId, (msg ?? {}) as object),
+    // Rewarded ad "double match cash" on the result card: { rewardToken }. Answers `adRewardResult`
+    // { ok, reason? }; ok only for a Boxity-verified token, once per finished match (the client then
+    // grants the cash, as it does every reward).
+    adReward: async (client: Client, msg: { rewardToken?: unknown }) => {
+      const sid = client.sessionId;
+      const at = this.adWindow.get(sid);
+      if (!at || Date.now() - at > AD_REWARD_WINDOW_MS) return client.send("adRewardResult", { ok: false, reason: "no-match" });
+      this.adWindow.delete(sid); // one claim per match, whatever the answer
+      const v = await verifyAdReward(msg?.rewardToken);
+      client.send("adRewardResult", v.valid ? { ok: true, test: !!v.test } : { ok: false, reason: v.reason || "invalid" });
+    },
     // Re-states identity after a login/logout that happens AFTER join (a guest who signs in
     // mid-session). The server answers with progress/noProgress for the new identity.
-    identify: (client: Client, msg: { username?: string; userId?: string; pfp?: string }) => {
+    identify: (client: Client, msg: { username?: string; userId?: string; token?: string; pfp?: string }) => {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       if (typeof msg?.username === "string") p.username = sanitizeName(msg.username);
       if (typeof msg?.pfp === "string") p.pfp = sanitizePfp(msg.pfp);
-      if (typeof msg?.userId === "string") this.setUserId(client, p, msg.userId);
+      if (typeof msg?.userId === "string" || typeof msg?.token === "string") this.identifyAs(client, p, msg);
     },
   };
 
@@ -222,10 +265,12 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   // LEADERBOARD_EVERY_MS, and once right after their save loads. Playtime gifts: every loaded
   // session's clock moves every GIFT_TICK_MS.
   onCreate() {
+    WorldRoom.live.add(this);
     this.clock.setInterval(() => {
       for (const c of this.clients) void this.sendLeaderboard(c);
     }, LEADERBOARD_EVERY_MS);
     this.clock.setInterval(() => this.tickGifts(), GIFT_TICK_MS);
+    this.clock.setInterval(() => this.tables.tick(), TABLE_TICK_MS);
   }
 
   // Moves every session's gift clock to `now`: connected time counts, a new UTC day resets (and
@@ -274,7 +319,11 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  onJoin(client: Client, options?: { username?: string; userId?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string; stats?: unknown }) {
+  onDispose() {
+    WorldRoom.live.delete(this);
+  }
+
+  onJoin(client: Client, options?: { username?: string; userId?: string; token?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string; stats?: unknown }) {
     const p = new PlayerState();
     p.username = sanitizeName(options?.username);
     p.pfp = sanitizePfp(options?.pfp);
@@ -284,7 +333,58 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     applyAvatar(p, options);
     applyStats(p, options?.stats);
     this.state.players.set(client.sessionId, p);
-    this.setUserId(client, p, typeof options?.userId === "string" ? options.userId : "");
+    this.identifyAs(client, p, options ?? {});
+  }
+
+  // Who a session is: the Boxity account its token verifies to (on Boxity hosting a client-sent id
+  // is never trusted), else a guest. Off Boxity hosting (local dev, tests) the client's userId is
+  // taken as before. Checks run in order per session, then setUserId answers progress / noProgress.
+  private identifyAs(client: Client, p: PlayerState, msg: { userId?: unknown; token?: unknown }) {
+    const sid = client.sessionId;
+    const run = async () => {
+      let userId = "";
+      const verified = await verifyToken(msg.token);
+      if (verified) userId = verified.id;
+      else if (!boxity.deployed && typeof msg.userId === "string") userId = msg.userId;
+      if (this.state.players.get(sid) !== p) return; // left meanwhile
+      this.setUserId(client, p, userId);
+    };
+    const next = (this.idChain.get(sid) ?? Promise.resolve()).then(run, run);
+    this.idChain.set(sid, next);
+  }
+
+  // Server-counted matches: `won` adds a win, else a match played (a match starting).
+  private countMatch(sids: string[], won: boolean) {
+    const players = getPlayers();
+    for (const sid of sids) {
+      const c = this.counts.get(sid);
+      const userId = this.userIds.get(sid);
+      if (!c || !userId) continue;
+      if (won) c.wins++;
+      else c.matches++;
+      if (players) void players.updateOne({ _id: userId }, { $inc: won ? { matchWins: 1 } : { matchesPlayed: 1 } }, { upsert: true }).catch((err) => console.warn("[WorldRoom] match count failed", err));
+    }
+  }
+  // A match ended: the winners' wins (and the Wins board), and everyone's rewarded-ad window.
+  private matchEnded(winners: string[], sids: string[]) {
+    this.countMatch(winners, true);
+    const now = Date.now();
+    for (const sid of sids) this.adWindow.set(sid, now);
+    if (!getPlayers()) return; // nothing is counted for good without a database
+    const rows = winners.flatMap((sid) => {
+      const c = this.counts.get(sid);
+      const userId = this.userIds.get(sid);
+      return c && userId ? [{ userId, wins: c.wins }] : [];
+    });
+    if (rows.length) void reportWins(rows);
+  }
+  // Profile stats rows of every signed-in player here (index.ts sends them every STATS_EVERY_MS).
+  statRows(): { userId: string; wins: number; matches: number }[] {
+    if (!getPlayers()) return [];
+    return [...this.counts].flatMap(([sid, c]) => {
+      const userId = this.userIds.get(sid);
+      return userId ? [{ userId, wins: c.wins, matches: c.matches }] : [];
+    });
   }
 
   // A deliberate `room.leave()` closes with CONSENTED -- drop the player at once. Anything
@@ -321,6 +421,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
 
   // Drops a session's per-connection bookkeeping.
   private forgetSession(sessionId: string) {
+    this.tables.leave(sessionId, "gone");
     this.state.players.delete(sessionId);
     this.userIds.delete(sessionId);
     this.identified.delete(sessionId);
@@ -331,6 +432,9 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.abilityBusy.delete(sessionId);
     this.gifts.delete(sessionId);
     this.emoteAt.delete(sessionId);
+    this.counts.delete(sessionId);
+    this.adWindow.delete(sessionId);
+    this.idChain.delete(sessionId);
   }
 
   // Runs one Ability Spin action and stores the result (rolled back in memory when it can't be).
@@ -452,7 +556,9 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     this.spinStates.delete(client.sessionId); // nor spins
     this.abilityStates.delete(client.sessionId); // nor abilities
     this.gifts.delete(client.sessionId); // nor gifts
+    this.counts.delete(client.sessionId); // nor match counts
     p.signedIn = !!userId;
+    p.uid = userId;
 
     if (userId) {
       // Evict any OTHER live session already claiming this account, so one account never has
@@ -501,6 +607,7 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     if (this.state.players.get(client.sessionId) !== p || (this.userIds.get(client.sessionId) ?? "") !== userId) return;
 
     this.loaded.add(client.sessionId);
+    if (userId) this.counts.set(client.sessionId, { wins: doc?.matchWins ?? 0, matches: doc?.matchesPlayed ?? 0 });
     const now = Date.now();
     const spin = spinStateFrom(doc, now);
     this.spinStates.set(client.sessionId, spin);
